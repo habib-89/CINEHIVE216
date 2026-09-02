@@ -1,0 +1,13 @@
+backend server run : node server.js
+
+frontend server run : npm run dev
+
+Server:   http://localhost:3000/
+
+seats:   http://localhost:3000/showtimes/1/seats
+
+showtimes: http://localhost:3000/movies/1/showtimes
+
+ignore bug : npm approve-scripts --allow-scripts-pending
+
+db pass : CineHive@2026
