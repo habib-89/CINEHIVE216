@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 
-export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson, onBack }) {
+export default function MovieDetail({ movieId, role, onSelectShowtime, onSelectPerson, onBack }) {
+  const isCustomer = role === 'CUSTOMER';
   const [movie, setMovie] = useState(null);
   const [showtimes, setShowtimes] = useState([]);
   const [cast, setCast] = useState([]);
@@ -33,12 +34,12 @@ export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson,
       })
       .catch((err) => setError(err.message));
 
-    if (api.isLoggedIn()) {
+    if (isCustomer) {
       api.getWatchlist()
         .then((list) => setInWatchlist(list.some((m) => m.MOVIE_ID === Number(movieId))))
         .catch(() => {});
     }
-  }, [movieId]);
+  }, [movieId, isCustomer]);
 
   async function toggleWatchlist() {
     try {
@@ -114,7 +115,7 @@ export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson,
                 {rating.AVG_RATING ?? '—'}<span className="out-of">/10</span>
               </span>
               <span className="movie-meta">({rating.RATING_COUNT ?? 0} ratings)</span>
-              {api.isLoggedIn() && (
+              {isCustomer && (
                 <div className="rate-stars">
                   {Array.from({ length: 10 }).map((_, i) => (
                     <button
@@ -133,7 +134,7 @@ export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson,
 
           <p className="description">{movie.DESCRIPTION}</p>
 
-          {api.isLoggedIn() && (
+          {isCustomer && (
             <button className={`btn-secondary ${inWatchlist ? 'active' : ''}`} onClick={toggleWatchlist}>
               {inWatchlist ? '✓ In Watchlist' : '+ Add to Watchlist'}
             </button>
@@ -160,7 +161,13 @@ export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson,
       {showtimes.length === 0 && <p className="movie-meta">No showtimes scheduled.</p>}
       <div className="showtime-list">
         {showtimes.map((st) => (
-          <button key={st.SHOWTIME_ID} className="ticket-stub" onClick={() => onSelectShowtime(st.SHOWTIME_ID)}>
+          <button
+            key={st.SHOWTIME_ID}
+            className="ticket-stub"
+            disabled={!isCustomer}
+            onClick={() => isCustomer && onSelectShowtime(st.SHOWTIME_ID)}
+            title={isCustomer ? 'Choose seats' : 'Only customers can book tickets'}
+          >
             <div className="ticket-main">
               <span className="ticket-date">
                 {new Date(st.SHOW_DATE).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
@@ -176,7 +183,7 @@ export default function MovieDetail({ movieId, onSelectShowtime, onSelectPerson,
       </div>
 
       <div className="section-heading"><h2>Reviews</h2></div>
-      {api.isLoggedIn() && (
+      {isCustomer && (
         <form onSubmit={handleReviewSubmit} className="review-form">
           <textarea
             placeholder="Share your thoughts..."

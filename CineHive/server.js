@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const db = require('./db');
 
 const app = express();
@@ -11,6 +12,18 @@ app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET must be configured');
+}
+
+function issueToken(user) {
+  return jwt.sign(
+    { userId: user.USER_ID, username: user.USERNAME, jti: crypto.randomUUID() },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
 
 // --- Auth routes ---
 
@@ -27,8 +40,8 @@ app.post('/auth/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await db.execute(
-      `INSERT INTO APP_USER (USERNAME, EMAIL, PASSWORD_HASH, DATE_OF_BIRTH, DATE_JOINED)
-       VALUES (:username, :email, :passwordHash, :dateOfBirth, SYSDATE)
+      `INSERT INTO APP_USER (USERNAME, EMAIL, PASSWORD_HASH, DATE_OF_BIRTH, DATE_JOINED, ROLE)
+       VALUES (:username, :email, :passwordHash, :dateOfBirth, SYSDATE, 'CUSTOMER')
        RETURNING USER_ID INTO :userId`,
       {
         username,
@@ -40,8 +53,9 @@ app.post('/auth/register', async (req, res) => {
     );
     const userId = result.outBinds.userId[0];
 
-    const token = jwt.sign({ userId, username }, JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ message: 'User registered', userId, token });
+    const user = { USER_ID: userId, USERNAME: username, ROLE: 'CUSTOMER' };
+    const token = issueToken(user);
+    res.status(201).json({ message: 'User registered', userId, username, role: user.ROLE, token });
   } catch (err) {
     console.error(err);
     if (err.errorNum === 1) {
@@ -62,7 +76,7 @@ app.post('/auth/login', async (req, res) => {
 
   try {
     const result = await db.execute(
-      `SELECT USER_ID, USERNAME, PASSWORD_HASH FROM APP_USER WHERE EMAIL = :email`,
+      `SELECT USER_ID, USERNAME, PASSWORD_HASH, ROLE FROM APP_USER WHERE EMAIL = :email`,
       { email }
     );
 
@@ -77,16 +91,16 @@ app.post('/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const token = jwt.sign({ userId: user.USER_ID, username: user.USERNAME }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Login successful', userId: user.USER_ID, username: user.USERNAME, token });
+    const token = issueToken(user);
+    res.json({ message: 'Login successful', userId: user.USER_ID, username: user.USERNAME, role: user.ROLE, token });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to log in' });
   }
 });
 
-// Middleware: verifies a JWT and attaches the user to req.user
-function requireAuth(req, res, next) {
+// Middleware: verifies the JWT, checks server-side logout, and resolves the role from Oracle.
+async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header' });
@@ -94,18 +108,85 @@ function requireAuth(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
-    next();
+    const revoked = await db.execute(
+      `SELECT 1 FROM TOKEN_REVOCATION WHERE TOKEN_JTI = :jti`,
+      { jti: payload.jti }
+    );
+    if (revoked.rows.length > 0) {
+      return res.status(401).json({ error: 'This session has been logged out' });
+    }
+
+    const userResult = await db.execute(
+      `SELECT USER_ID, USERNAME, ROLE FROM APP_USER WHERE USER_ID = :userId`,
+      { userId: payload.userId }
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'User account no longer exists' });
+    }
+    const currentUser = userResult.rows[0];
+    req.user = {
+      userId: currentUser.USER_ID,
+      username: currentUser.USERNAME,
+      role: currentUser.ROLE,
+      tokenJti: payload.jti,
+      tokenExpiry: payload.exp
+    };
+    return next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'You do not have permission to use this feature' });
+    }
+    next();
+  };
+}
+
+// Customer actions are deliberately guarded on the server as well as hidden in
+// the UI. This prevents an administrator token from calling them directly.
+const requireCustomer = requireRole('CUSTOMER');
+
+// Logout invalidates this JWT server-side. TOKEN_REVOCATION is created by db/60_percent_migration.sql.
+app.post('/auth/logout', requireAuth, async (req, res) => {
+  try {
+    await db.execute(
+      `INSERT INTO TOKEN_REVOCATION (TOKEN_JTI, EXPIRES_AT) VALUES (:jti, TO_TIMESTAMP_TZ(:expiresAt, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'))`,
+      { jti: req.user.tokenJti, expiresAt: new Date(req.user.tokenExpiry * 1000).toISOString() }
+    );
+    return res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to log out' });
+  }
+});
 
 // --- Routes ---
 
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'CineHive API is running' });
+});
+
+// Admin-only operational summary. This is deliberately server-side protected.
+app.get('/admin/dashboard', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const result = await db.execute(
+      `SELECT
+         (SELECT COUNT(*) FROM APP_USER) AS USER_COUNT,
+         (SELECT COUNT(*) FROM MOVIE) AS MOVIE_COUNT,
+         (SELECT COUNT(*) FROM BOOKING) AS BOOKING_COUNT,
+         (SELECT NVL(SUM(TOTAL_AMOUNT), 0) FROM BOOKING) AS BOOKING_REVENUE
+       FROM dual`
+    );
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to load admin dashboard' });
+  }
 });
 
 // Get all movies
@@ -182,9 +263,9 @@ app.get('/showtimes/:id/seats', async (req, res) => {
   }
 });
 
-// Create a booking with one or more seats (requires login)
+// Create a booking with one or more seats (customer-only)
 // Expects JSON body: { showtimeId, seatIds: [1,2,3] }
-app.post('/bookings', requireAuth, async (req, res) => {
+app.post('/bookings', requireAuth, requireCustomer, async (req, res) => {
   const userId = req.user.userId;
   const { showtimeId, seatIds } = req.body;
 
@@ -339,10 +420,10 @@ app.get('/directors/:id', async (req, res) => {
   }
 });
 
-// --- Watchlist (requires login) ---
+// --- Watchlist (customer-only) ---
 
 // Get the logged-in user's watchlist
-app.get('/watchlist', requireAuth, async (req, res) => {
+app.get('/watchlist', requireAuth, requireCustomer, async (req, res) => {
   try {
     const result = await db.execute(
       `SELECT m.MOVIE_ID, m.TITLE, m.POSTER_URL, m.DURATION, m.LANGUAGE, w.ADDED_DATE
@@ -360,7 +441,7 @@ app.get('/watchlist', requireAuth, async (req, res) => {
 });
 
 // Add a movie to the watchlist
-app.post('/watchlist', requireAuth, async (req, res) => {
+app.post('/watchlist', requireAuth, requireCustomer, async (req, res) => {
   const { movieId } = req.body;
   if (!movieId) return res.status(400).json({ error: 'movieId is required' });
 
@@ -380,7 +461,7 @@ app.post('/watchlist', requireAuth, async (req, res) => {
 });
 
 // Remove a movie from the watchlist
-app.delete('/watchlist/:movieId', requireAuth, async (req, res) => {
+app.delete('/watchlist/:movieId', requireAuth, requireCustomer, async (req, res) => {
   try {
     const result = await db.execute(
       `DELETE FROM WATCHLIST WHERE USER_ID = :userId AND MOVIE_ID = :movieId`,
@@ -413,8 +494,8 @@ app.get('/movies/:id/reviews', async (req, res) => {
   }
 });
 
-// Post a review (requires login)
-app.post('/movies/:id/reviews', requireAuth, async (req, res) => {
+// Post a review (customer-only)
+app.post('/movies/:id/reviews', requireAuth, requireCustomer, async (req, res) => {
   const { reviewText } = req.body;
   if (!reviewText) return res.status(400).json({ error: 'reviewText is required' });
 
@@ -466,8 +547,8 @@ app.get('/movies/:id/rating', async (req, res) => {
   }
 });
 
-// Set (or update) the logged-in user's rating for a movie
-app.post('/movies/:id/rating', requireAuth, async (req, res) => {
+// Set (or update) the logged-in customer's rating for a movie
+app.post('/movies/:id/rating', requireAuth, requireCustomer, async (req, res) => {
   const { ratingValue } = req.body;
   if (ratingValue == null || ratingValue < 0 || ratingValue > 10) {
     return res.status(400).json({ error: 'ratingValue must be between 0 and 10' });
@@ -493,7 +574,7 @@ app.post('/movies/:id/rating', requireAuth, async (req, res) => {
 // --- Booking history ---
 
 // Get the logged-in user's past bookings
-app.get('/bookings/me', requireAuth, async (req, res) => {
+app.get('/bookings/me', requireAuth, requireCustomer, async (req, res) => {
   try {
     const result = await db.execute(
       `SELECT b.BOOKING_ID, b.BOOKING_DATE, b.TOTAL_AMOUNT, b.PAYMENT_STATUS,

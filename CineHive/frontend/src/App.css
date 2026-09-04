@@ -1017,3 +1017,32 @@ header.marquee {
     animation: none !important;
   }
 }
+
+.role-badge {
+  border: 1px solid var(--gold);
+  border-radius: 999px;
+  color: var(--gold);
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  padding: .35rem .65rem;
+}
+
+.admin-stats {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: 1.5rem;
+}
+
+.admin-stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: grid;
+  gap: .4rem;
+  padding: 1.2rem;
+}
+
+.admin-stat span { color: var(--muted); font-size: .85rem; }
+.admin-stat strong { font-size: 1.8rem; }

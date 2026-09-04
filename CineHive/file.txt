@@ -1,13 +1,7 @@
-backend server run : node server.js
+Double-click `start-cinehive.cmd` to launch both the backend and frontend.
+Use `start-backend.cmd` or `frontend/start-frontend.cmd` when you need only one.
 
-frontend server run : npm run dev
+API base URL: http://localhost:3000/
 
-Server:   http://localhost:3000/
-
-seats:   http://localhost:3000/showtimes/1/seats
-
-showtimes: http://localhost:3000/movies/1/showtimes
-
-ignore bug : npm approve-scripts --allow-scripts-pending
-
-db pass : CineHive@2026
+Before starting, create `CineHive/.env` from `.env.example` and provide valid local Oracle credentials.
+Never commit credentials, connection strings containing passwords, or JWT secrets.

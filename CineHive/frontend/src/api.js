@@ -11,6 +11,7 @@ function setToken(token) {
 
 function clearToken() {
   localStorage.removeItem('cinehive_token');
+  localStorage.removeItem('cinehive_user');
 }
 
 async function request(path, options = {}) {
@@ -64,7 +65,19 @@ export const api = {
 
   getMyBookings: () => request('/bookings/me'),
 
+  getAdminDashboard: () => request('/admin/dashboard'),
+
   isLoggedIn: () => !!getToken(),
-  logout: clearToken,
-  saveToken: setToken,
+  getSession: () => JSON.parse(localStorage.getItem('cinehive_user') || 'null'),
+  logout: async () => {
+    try {
+      if (getToken()) await request('/auth/logout', { method: 'POST' });
+    } finally {
+      clearToken();
+    }
+  },
+  saveSession: ({ token, userId, username, role }) => {
+    setToken(token);
+    localStorage.setItem('cinehive_user', JSON.stringify({ userId, username, role }));
+  },
 };
